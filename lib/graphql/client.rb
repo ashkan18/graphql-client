@@ -95,23 +95,7 @@ module GraphQL
       @types = Schema.generate(@schema)
     end
 
-    def parse(str, filename = nil, lineno = nil)
-      if filename.nil? && lineno.nil?
-        location = caller_locations(1, 1).first
-        filename = location.path
-        lineno = location.lineno
-      end
-
-      unless filename.is_a?(String)
-        raise TypeError, "expected filename to be a String, but was #{filename.class}"
-      end
-
-      unless lineno.is_a?(Integer)
-        raise TypeError, "expected lineno to be a Integer, but was #{lineno.class}"
-      end
-
-      source_location = [filename, lineno].freeze
-
+    def get_definition_dependencies(str, filename, lineno)
       definition_dependencies = Set.new
 
       str = str.gsub(/\.\.\.([a-zA-Z0-9_]+(::[a-zA-Z0-9_]+)*)/) do
@@ -147,25 +131,26 @@ module GraphQL
           end
         end
       end
+      [str , definition_dependencies]
+    end
 
-      doc = GraphQL.parse(str)
-
+    def insert_typename_fields(schema, doc)
       document_types = DocumentTypes.analyze_types(self.schema, doc).freeze
       QueryTypename.insert_typename_fields(doc, types: document_types)
+    end
 
+    def set_anonymous_nodes(doc)
       doc.definitions.each do |node|
         node.name ||= "__anonymous__"
       end
+    end
 
-      document_dependencies = Language::Nodes::Document.new(definitions: doc.definitions + definition_dependencies.to_a)
-
+    def validate_query(query, schema, filename = nil, lineno = nil)
       rules = GraphQL::StaticValidation::ALL_RULES - [
         GraphQL::StaticValidation::FragmentsAreUsed,
         GraphQL::StaticValidation::FieldsHaveAppropriateSelections
       ]
       validator = GraphQL::StaticValidation::Validator.new(schema: self.schema, rules: rules)
-      query = GraphQL::Query.new(self.schema, document: document_dependencies)
-
       errors = validator.validate(query)
       errors.fetch(:errors).each do |error|
         error_hash = error.to_h
@@ -174,6 +159,38 @@ module GraphQL
         error.set_backtrace(["#{filename}:#{lineno + validation_line}"] + caller)
         raise error
       end
+      errors
+    end
+
+    def parse(str, filename = nil, lineno = nil)
+      if filename.nil? && lineno.nil?
+        location = caller_locations(1, 1).first
+        filename = location.path
+        lineno = location.lineno
+      end
+
+      unless filename.is_a?(String)
+        raise TypeError, "expected filename to be a String, but was #{filename.class}"
+      end
+
+      unless lineno.is_a?(Integer)
+        raise TypeError, "expected lineno to be a Integer, but was #{lineno.class}"
+      end
+
+      source_location = [filename, lineno].freeze
+
+      str, definition_dependencies = get_definition_dependencies(str, filename, lineno)
+
+      doc = GraphQL.parse(str)
+
+      insert_typename_fields(schema, doc)
+      set_anonymous_nodes(doc)
+
+      document_dependencies = Language::Nodes::Document.new(definitions: doc.definitions + definition_dependencies.to_a)
+
+      query = GraphQL::Query.new(self.schema, document: document_dependencies)
+
+      errors = validate_query(query, self.schema, filename, lineno)
 
       definitions = {}
       doc.definitions.each do |node|
